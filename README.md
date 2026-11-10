@@ -49,9 +49,9 @@ This is an unofficial port. It is not affiliated with or endorsed by Laravel.
 
 ## Running
 
-The stylesheet is the one Laravel's own build produces. Build the original
-app's assets (`npm run build`), then copy `public/build/assets/app-*.css` to
-`static/build/app.css` here. Without it the page loads but is unstyled.
+The stylesheet in `static/build/app.css` is the one the original app's own build
+produces (`npm run build`, then `public/build/assets/app-*.css`), copied here
+unchanged so both sites render from identical CSS.
 
 ```bash
 cargo run -- seed   # optional: 3 demo users and 6 chirps (password: "password")

@@ -733,7 +733,7 @@ fn security_header(name: &'static str, value: &'static str) -> SetResponseHeader
 /// styles, fonts and avatars from. No inline script is allowed to run.
 const CSP: &str = "default-src 'self'; script-src 'self'; \
     style-src 'self' https://cdn.jsdelivr.net https://fonts.bunny.net; \
-    font-src https://fonts.bunny.net; \
+    font-src https://fonts.bunny.net https://cdn.jsdelivr.net; \
     img-src 'self' data: https://avatars.laravel.cloud; \
     form-action 'self'; frame-ancestors 'none'; base-uri 'self'; object-src 'none'";
 
