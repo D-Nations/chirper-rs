@@ -1,0 +1,19 @@
+[package]
+name = "chirper-rs"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Rust port of the Laravel Bootcamp Chirper demo app"
+
+[dependencies]
+askama = "0.16.1"
+axum = "0.8.9"
+bcrypt = "0.19.3"
+chrono = "0.4.45"
+rand = "0.10.3"
+serde = { version = "1.0.229", features = ["derive"] }
+sqlx = { version = "0.9.0", features = ["runtime-tokio", "sqlite"] }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net"] }
+tower-http = { version = "0.7.1", features = ["fs", "set-header"] }
+tower-sessions = "0.15.0"
+urlencoding = "2.1.3"

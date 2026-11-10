@@ -1,0 +1,88 @@
+{% extends "layout.html" %}
+{% block title %}Register{% endblock %}
+{% block content %}
+
+    <div class="hero min-h-[calc(100vh-16rem)]">
+        <div class="hero-content flex-col">
+            <div class="card w-96 bg-base-100">
+                <div class="card-body">
+                    <h1 class="mt-1 text-xl font-bold text-center mb-6">Create Account</h1>
+
+                    <form method="POST" action="/register">
+                        <input type="hidden" name="_token" value="{{ ctx.csrf }}" autocomplete="off">
+
+                        <!-- Name -->
+                        <label class="floating-label mb-6">
+                            <input type="text"
+                                   name="name"
+                                   placeholder="John Doe"
+                                   value="{{ old.val("name") }}"
+                                   class="input input-bordered{% if errors.contains_key("name") %} input-error{% endif %}"
+                                   required>
+                            <span>Name</span>
+                        </label>
+                        {% if let Some(message) = errors.get("name") %}
+                            <div class="label -mt-4 mb-2">
+                                <span class="label-text-alt text-error">{{ message }}</span>
+                            </div>
+                        {% endif %}
+
+                        <!-- Email -->
+                        <label class="floating-label mb-6">
+                            <input type="email"
+                                   name="email"
+                                   placeholder="mail@example.com"
+                                   value="{{ old.val("email") }}"
+                                   class="input input-bordered{% if errors.contains_key("email") %} input-error{% endif %}"
+                                   required>
+                            <span>Email</span>
+                        </label>
+                        {% if let Some(message) = errors.get("email") %}
+                            <div class="label -mt-4 mb-2">
+                                <span class="label-text-alt text-error">{{ message }}</span>
+                            </div>
+                        {% endif %}
+
+                        <!-- Password -->
+                        <label class="floating-label mb-6">
+                            <input type="password"
+                                   name="password"
+                                   placeholder="••••••••"
+                                   class="input input-bordered{% if errors.contains_key("password") %} input-error{% endif %}"
+                                   required>
+                            <span>Password</span>
+                        </label>
+                        {% if let Some(message) = errors.get("password") %}
+                            <div class="label -mt-4 mb-2">
+                                <span class="label-text-alt text-error">{{ message }}</span>
+                            </div>
+                        {% endif %}
+
+                        <!-- Password Confirmation -->
+                        <label class="floating-label mb-6">
+                            <input type="password"
+                                   name="password_confirmation"
+                                   placeholder="••••••••"
+                                   class="input input-bordered"
+                                   required>
+                            <span>Confirm Password</span>
+                        </label>
+
+                        <!-- Submit Button -->
+                        <div class="form-control mt-8">
+                            <button type="submit" class="btn btn-primary btn-sm w-full">
+                                Register
+                            </button>
+                        </div>
+                    </form>
+
+                    <div class="divider">OR</div>
+                    <p class="text-center text-sm">
+                        Already have an account?
+                        <a href="/login" class="link link-primary">Sign in</a>
+                    </p>
+                </div>
+            </div>
+        </div>
+    </div>
+{% endblock %}

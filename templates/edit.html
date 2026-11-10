@@ -1,0 +1,37 @@
+{% extends "layout.html" %}
+{% block title %}Edit Chirp{% endblock %}
+{% block content %}
+
+    <div class="max-w-2xl mx-auto">
+        <h1 class="text-3xl font-bold mt-8">Edit Chirp</h1>
+
+        <div class="card bg-base-100 mt-8">
+            <div class="card-body">
+                <form method="POST" action="/chirps/{{ chirp.id }}">
+                    <input type="hidden" name="_token" value="{{ ctx.csrf }}" autocomplete="off">
+                    <input type="hidden" name="_method" value="PUT">
+
+                    <div class="form-control w-full">
+                        <textarea name="message" class="textarea textarea-bordered w-full resize-none{% if errors.contains_key("message") %} textarea-error{% endif %}"
+                            rows="4" maxlength="255" required>{{ message_value }}</textarea>
+
+                        {% if let Some(message) = errors.get("message") %}
+                            <div class="label">
+                                <span class="label-text-alt text-error">{{ message }}</span>
+                            </div>
+                        {% endif %}
+                    </div>
+
+                    <div class="card-actions justify-between mt-4">
+                        <a href="/" class="btn btn-ghost btn-sm">
+                            Cancel
+                        </a>
+                        <button type="submit" class="btn btn-primary btn-sm">
+                            Update Chirp
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+{% endblock %}
