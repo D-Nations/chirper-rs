@@ -18,8 +18,13 @@ use serde::Deserialize;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use tower_http::{services::ServeDir, set_header::SetResponseHeaderLayer};
 use tower_sessions::{
-    Expiry, MemoryStore, Session, SessionManagerLayer,
-    cookie::{SameSite, time::Duration},
+    Expiry, Session, SessionManagerLayer, SessionStore,
+    cookie::{
+        SameSite,
+        time::{Duration, OffsetDateTime},
+    },
+    session::{Id, Record},
+    session_store,
 };
 
 const TS_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
@@ -154,10 +159,76 @@ fn render(tpl: impl Template) -> AppResult {
     Ok(Html(tpl.render()?).into_response())
 }
 
+// ---------------------------------------------------------- session store ---
+
+/// Most sessions kept in memory at once. Every visitor gets a session (it
+/// holds their CSRF token), so without a limit a flood of anonymous requests
+/// would grow memory until the process is killed.
+const MAX_SESSIONS: usize = 50_000;
+
+/// An in-memory session store with a size limit. When it is full it drops
+/// expired sessions, then anonymous ones; signed-in sessions are kept, so a
+/// flood of anonymous traffic cannot sign people out.
+#[derive(Clone, Debug, Default)]
+struct BoundedStore(std::sync::Arc<tokio::sync::Mutex<HashMap<Id, Record>>>);
+
+fn is_active(record: &Record) -> bool {
+    record.expiry_date > OffsetDateTime::now_utc()
+}
+
+fn make_room(sessions: &mut HashMap<Id, Record>) {
+    if sessions.len() < MAX_SESSIONS {
+        return;
+    }
+    sessions.retain(|_, record| is_active(record));
+    if sessions.len() >= MAX_SESSIONS {
+        sessions.retain(|_, record| record.data.contains_key("user_id"));
+    }
+}
+
+#[async_trait::async_trait]
+impl SessionStore for BoundedStore {
+    async fn create(&self, record: &mut Record) -> session_store::Result<()> {
+        let mut sessions = self.0.lock().await;
+        make_room(&mut sessions);
+        while sessions.contains_key(&record.id) {
+            record.id = Id::default();
+        }
+        sessions.insert(record.id, record.clone());
+        Ok(())
+    }
+
+    async fn save(&self, record: &Record) -> session_store::Result<()> {
+        let mut sessions = self.0.lock().await;
+        make_room(&mut sessions);
+        sessions.insert(record.id, record.clone());
+        Ok(())
+    }
+
+    async fn load(&self, session_id: &Id) -> session_store::Result<Option<Record>> {
+        Ok(self
+            .0
+            .lock()
+            .await
+            .get(session_id)
+            .filter(|record| is_active(record))
+            .cloned())
+    }
+
+    async fn delete(&self, session_id: &Id) -> session_store::Result<()> {
+        self.0.lock().await.remove(session_id);
+        Ok(())
+    }
+}
+
 // ------------------------------------------------------- session helpers ---
 
 fn random_token() -> String {
-    format!("{:032x}{:032x}", rand::random::<u128>(), rand::random::<u128>())
+    format!(
+        "{:032x}{:032x}",
+        rand::random::<u128>(),
+        rand::random::<u128>()
+    )
 }
 
 async fn csrf_token(session: &Session) -> AppResult<String> {
@@ -213,8 +284,14 @@ async fn page_ctx(session: &Session, db: &SqlitePool) -> AppResult<Ctx> {
 
 /// Validation errors and old input are shown once, then forgotten.
 async fn take_form_state(session: &Session) -> AppResult<(Errors, Old)> {
-    let errors = session.remove::<Errors>("errors").await?.unwrap_or_default();
-    let old = session.remove::<HashMap<String, String>>("old").await?.unwrap_or_default();
+    let errors = session
+        .remove::<Errors>("errors")
+        .await?
+        .unwrap_or_default();
+    let old = session
+        .remove::<HashMap<String, String>>("old")
+        .await?
+        .unwrap_or_default();
     Ok((errors, Old(old)))
 }
 
@@ -229,8 +306,10 @@ async fn back_with_errors(
     errors: Errors,
     old: &[(&str, &str)],
 ) -> AppResult {
-    let old: HashMap<String, String> =
-        old.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    let old: HashMap<String, String> = old
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
     session.insert("errors", errors).await?;
     session.insert("old", old).await?;
     Ok(Redirect::to(to).into_response())
@@ -322,21 +401,28 @@ async fn home(State(db): State<SqlitePool>, session: Session) -> AppResult {
 
     let chirps = rows
         .into_iter()
-        .map(|(id, user_id, message, created_at, updated_at, user_name, email)| {
-            let created = parse_ts(&created_at);
-            ChirpView {
-                id,
-                message,
-                user_name,
-                avatar_key: urlencoding::encode(&email).into_owned(),
-                ago: diff_for_humans(created, now),
-                edited: parse_ts(&updated_at) > created + chrono::Duration::seconds(5),
-                owned: viewer_id == Some(user_id),
-            }
-        })
+        .map(
+            |(id, user_id, message, created_at, updated_at, user_name, email)| {
+                let created = parse_ts(&created_at);
+                ChirpView {
+                    id,
+                    message,
+                    user_name,
+                    avatar_key: urlencoding::encode(&email).into_owned(),
+                    ago: diff_for_humans(created, now),
+                    edited: parse_ts(&updated_at) > created + chrono::Duration::seconds(5),
+                    owned: viewer_id == Some(user_id),
+                }
+            },
+        )
         .collect();
 
-    render(HomeTpl { ctx, chirps, errors, old })
+    render(HomeTpl {
+        ctx,
+        chirps,
+        errors,
+        old,
+    })
 }
 
 #[derive(Deserialize)]
@@ -366,13 +452,15 @@ async fn store_chirp(
     };
 
     let ts = now();
-    sqlx::query("insert into chirps (user_id, message, created_at, updated_at) values (?, ?, ?, ?)")
-        .bind(user.id)
-        .bind(message)
-        .bind(&ts)
-        .bind(&ts)
-        .execute(&db)
-        .await?;
+    sqlx::query(
+        "insert into chirps (user_id, message, created_at, updated_at) values (?, ?, ?, ?)",
+    )
+    .bind(user.id)
+    .bind(message)
+    .bind(&ts)
+    .bind(&ts)
+    .execute(&db)
+    .await?;
 
     flash(&session, "Your chirp has been posted!").await?;
     Ok(Redirect::to("/").into_response())
@@ -405,7 +493,12 @@ async fn edit_chirp(
         Some(previous) => previous.clone(),
         None => message,
     };
-    render(EditTpl { ctx, chirp: EditChirp { id }, message_value, errors })
+    render(EditTpl {
+        ctx,
+        chirp: EditChirp { id },
+        message_value,
+        errors,
+    })
 }
 
 /// HTML forms can only POST, so (as in Laravel) a hidden `_method` field
@@ -427,8 +520,13 @@ async fn modify_chirp(
                 Err(error) => {
                     let errors = HashMap::from([("message".to_string(), error)]);
                     let back = format!("/chirps/{id}/edit");
-                    return back_with_errors(&session, &back, errors, &[("message", &form.message)])
-                        .await;
+                    return back_with_errors(
+                        &session,
+                        &back,
+                        errors,
+                        &[("message", &form.message)],
+                    )
+                    .await;
                 }
             };
             sqlx::query("update chirps set message = ?, updated_at = ? where id = ?")
@@ -440,7 +538,10 @@ async fn modify_chirp(
             flash(&session, "Chirp updated!").await?;
         }
         "DELETE" => {
-            sqlx::query("delete from chirps where id = ?").bind(id).execute(&db).await?;
+            sqlx::query("delete from chirps where id = ?")
+                .bind(id)
+                .execute(&db)
+                .await?;
             flash(&session, "Chirp deleted!").await?;
         }
         _ => return Err(AppError::MethodNotAllowed),
@@ -485,7 +586,10 @@ async fn login(
     if email.is_empty() {
         errors.insert("email".into(), "The email field is required.".into());
     } else if !looks_like_email(&email) {
-        errors.insert("email".into(), "The email field must be a valid email address.".into());
+        errors.insert(
+            "email".into(),
+            "The email field must be a valid email address.".into(),
+        );
     }
     if form.password.is_empty() {
         errors.insert("password".into(), "The password field is required.".into());
@@ -569,7 +673,10 @@ async fn register(
     if email.is_empty() {
         errors.insert("email".into(), "The email field is required.".into());
     } else if !looks_like_email(&email) {
-        errors.insert("email".into(), "The email field must be a valid email address.".into());
+        errors.insert(
+            "email".into(),
+            "The email field must be a valid email address.".into(),
+        );
     } else if email.chars().count() > 255 {
         errors.insert(
             "email".into(),
@@ -687,17 +794,49 @@ const DEMO_USERS: &[(&str, &str)] = &[
     ("Priya Nair", "priya@example.com"),
 ];
 const DEMO_CHIRPS: &[(usize, i64, bool, &str)] = &[
-    (0, 4, false, "Just shipped the new onboarding flow. Coffee first, then bug reports."),
-    (1, 37, true, "Reminder: the meetup moved to Thursday at 6pm. Same room, better snacks."),
-    (2, 95, false, "Hot take: a tidy migration history is a love letter to your future self."),
-    (0, 260, false, "Anyone have a favourite talk on database indexing? Building a reading list."),
-    (1, 1_500, false, "Finally fixed the flaky test. It was a timezone. It is always a timezone."),
-    (2, 4_400, false, "Hello, Chirper! First post from the new account."),
+    (
+        0,
+        4,
+        false,
+        "Just shipped the new onboarding flow. Coffee first, then bug reports.",
+    ),
+    (
+        1,
+        37,
+        true,
+        "Reminder: the meetup moved to Thursday at 6pm. Same room, better snacks.",
+    ),
+    (
+        2,
+        95,
+        false,
+        "Hot take: a tidy migration history is a love letter to your future self.",
+    ),
+    (
+        0,
+        260,
+        false,
+        "Anyone have a favourite talk on database indexing? Building a reading list.",
+    ),
+    (
+        1,
+        1_500,
+        false,
+        "Finally fixed the flaky test. It was a timezone. It is always a timezone.",
+    ),
+    (
+        2,
+        4_400,
+        false,
+        "Hello, Chirper! First post from the new account.",
+    ),
 ];
 const DEMO_PASSWORD: &str = "password";
 
 async fn seed(db: &SqlitePool) -> AppResult<()> {
-    let (existing,) = sqlx::query_as::<_, (i64,)>("select count(*) from chirps").fetch_one(db).await?;
+    let (existing,) = sqlx::query_as::<_, (i64,)>("select count(*) from chirps")
+        .fetch_one(db)
+        .await?;
     if existing > 0 {
         println!("database already has chirps; nothing seeded");
         return Ok(());
@@ -709,16 +848,26 @@ async fn seed(db: &SqlitePool) -> AppResult<()> {
     }
     for (author, minutes_ago, edited, message) in DEMO_CHIRPS {
         let created = started - chrono::Duration::minutes(*minutes_ago);
-        let updated = if *edited { created + chrono::Duration::minutes(3) } else { created };
-        sqlx::query("insert into chirps (user_id, message, created_at, updated_at) values (?, ?, ?, ?)")
-            .bind(ids[*author])
-            .bind(*message)
-            .bind(created.format(TS_FORMAT).to_string())
-            .bind(updated.format(TS_FORMAT).to_string())
-            .execute(db)
-            .await?;
+        let updated = if *edited {
+            created + chrono::Duration::minutes(3)
+        } else {
+            created
+        };
+        sqlx::query(
+            "insert into chirps (user_id, message, created_at, updated_at) values (?, ?, ?, ?)",
+        )
+        .bind(ids[*author])
+        .bind(*message)
+        .bind(created.format(TS_FORMAT).to_string())
+        .bind(updated.format(TS_FORMAT).to_string())
+        .execute(db)
+        .await?;
     }
-    println!("seeded {} users and {} chirps", DEMO_USERS.len(), DEMO_CHIRPS.len());
+    println!(
+        "seeded {} users and {} chirps",
+        DEMO_USERS.len(),
+        DEMO_CHIRPS.len()
+    );
     Ok(())
 }
 
@@ -760,7 +909,7 @@ async fn run() -> AppResult<()> {
         return seed(&db).await;
     }
 
-    let sessions = SessionManagerLayer::new(MemoryStore::default())
+    let sessions = SessionManagerLayer::new(BoundedStore::default())
         .with_name("chirper_session")
         .with_secure(https_only)
         .with_http_only(true)
@@ -780,7 +929,10 @@ async fn run() -> AppResult<()> {
         .layer(security_header("content-security-policy", CSP))
         .layer(security_header("x-content-type-options", "nosniff"))
         .layer(security_header("x-frame-options", "DENY"))
-        .layer(security_header("referrer-policy", "strict-origin-when-cross-origin"))
+        .layer(security_header(
+            "referrer-policy",
+            "strict-origin-when-cross-origin",
+        ))
         .layer(SetResponseHeaderLayer::if_not_present(
             header::CACHE_CONTROL,
             HeaderValue::from_static("no-cache, private"),
@@ -828,8 +980,14 @@ mod tests {
     #[test]
     fn message_validation_mirrors_laravel_rules() {
         assert_eq!(validate_message("  hi  ", true).unwrap(), "hi");
-        assert_eq!(validate_message("   ", true).unwrap_err(), "Please write something to chirp!");
-        assert_eq!(validate_message("", false).unwrap_err(), "The message field is required.");
+        assert_eq!(
+            validate_message("   ", true).unwrap_err(),
+            "Please write something to chirp!"
+        );
+        assert_eq!(
+            validate_message("", false).unwrap_err(),
+            "The message field is required."
+        );
         assert!(validate_message(&"é".repeat(255), true).is_ok());
         assert!(validate_message(&"é".repeat(256), true).is_err());
     }
@@ -840,6 +998,34 @@ mod tests {
         assert!(!looks_like_email("ada"));
         assert!(!looks_like_email("a@b@c"));
         assert!(!looks_like_email("a b@c.com"));
+    }
+
+    fn record(signed_in: bool, minutes_left: i64) -> Record {
+        let mut data = HashMap::new();
+        if signed_in {
+            data.insert("user_id".to_string(), 1.into());
+        }
+        Record {
+            id: Id::default(),
+            data,
+            expiry_date: OffsetDateTime::now_utc() + Duration::minutes(minutes_left),
+        }
+    }
+
+    #[test]
+    fn a_full_store_drops_expired_then_anonymous_sessions() {
+        let mut sessions = HashMap::new();
+        let keep = record(true, 30);
+        sessions.insert(keep.id, keep.clone());
+        let expired = record(true, -1);
+        sessions.insert(expired.id, expired);
+        while sessions.len() <= MAX_SESSIONS {
+            let anonymous = record(false, 30);
+            sessions.insert(anonymous.id, anonymous);
+        }
+        make_room(&mut sessions);
+        assert_eq!(sessions.len(), 1);
+        assert!(sessions.contains_key(&keep.id));
     }
 
     #[test]

@@ -43,7 +43,8 @@ This is an unofficial port. It is not affiliated with or endorsed by Laravel.
 
 - "Remember me" extends the session to 30 days instead of issuing a separate
   remember-token cookie.
-- Sessions are held in memory, so they are lost on restart.
+- Sessions are held in memory (at most 50,000; anonymous ones are dropped first
+  when full), so they are lost on restart.
 - Email validation is a simple shape check, not Laravel's full RFC validator.
 - "x weeks/months ago" wording is approximated for dates older than a week.
 
@@ -68,6 +69,28 @@ migrations; both apps can read and write the same file.
 ```bash
 cargo test
 ```
+
+## Container image and measurements
+
+`docker build -t chirper-rs .` produces a static binary on an empty base image
+(about 7 MB), running as a non-root user. The dependency list is embedded with
+cargo-auditable so scanners such as Trivy can check it.
+
+`bench/laravel.Dockerfile` builds a production-style image of the Laravel
+original (Apache, OPcache, cached config) for comparison; build it from a
+checkout of laravel/bootcamp with `-f`. One run on one desktop, each container
+limited to 2 CPUs and 512 MB, 50 connections to `/` for 30 seconds:
+
+| | Laravel image | This port |
+|---|---|---|
+| Pages served | 3,842 | 174,944 |
+| Median response | about 100 ms | about 6 ms |
+| Peak memory | 170 MB | 37 MB |
+| Image size | 539 MB | 7 MB |
+| Trivy 0.76.2 findings | 1,431 (all OS packages) | 0 |
+
+Most of the Trivy difference comes from the Debian base of `php:8.4-apache`;
+`php:8.4-fpm-alpine` alone had one finding. Laravel Octane was not tested.
 
 ## Credits and licence
 

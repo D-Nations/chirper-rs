@@ -7,6 +7,7 @@ description = "Rust port of the Laravel Bootcamp Chirper demo app"
 
 [dependencies]
 askama = "0.16.1"
+async-trait = "0.1.92"
 axum = "0.8.9"
 bcrypt = "0.19.3"
 chrono = "0.4.45"
